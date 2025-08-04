@@ -1,0 +1,141 @@
+import streamlit as st
+import pandas as pd
+import pyodbc
+import xlsxwriter
+import os
+from datetime import datetime
+
+# --- Folder Setup ---
+SQL_FOLDER = 'sql_files'
+OUTPUT_FOLDER = 'output_reports'
+os.makedirs(SQL_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+# --- DB Connection Details ---
+SERVER = 'USER\\SQLEXPRESS'  # Replace with your actual server
+DATABASE = 'OnlineRetailDb'  # Replace with your database
+
+# --- Streaming Query Execution with Summary Sheet and Charts ---
+def run_query_streaming_to_excel(query, report_name):
+    conn = pyodbc.connect(
+        f'DRIVER={{SQL Server}};SERVER={SERVER};DATABASE={DATABASE};Trusted_Connection=yes;'
+    )
+    cursor = conn.cursor()
+    cursor.execute(query)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = f"{report_name}_{timestamp}_streamed.xlsx"
+    output_path = os.path.join(OUTPUT_FOLDER, file_name)
+
+    workbook = xlsxwriter.Workbook(output_path)
+    data_ws = workbook.add_worksheet("Data")
+
+    # --- Header ---
+    columns = [col[0] for col in cursor.description]
+    header_format = workbook.add_format({'bold': True, 'bg_color': '#D9E1F2', 'border': 1, 'align': 'center'})
+    for col_idx, col_name in enumerate(columns):
+        data_ws.write(0, col_idx, col_name, header_format)
+
+    data_ws.freeze_panes(1, 0)
+    data_ws.autofilter(0, 0, 1, len(columns) - 1)
+
+    # --- Stream rows + collect for summary ---
+    row_idx = 1
+    all_rows = []
+
+    while True:
+        rows = cursor.fetchmany(1000)
+        if not rows:
+            break
+        for row in rows:
+            row = list(row)
+            if len(row) == len(columns):
+                all_rows.append(row)
+                for col_idx, value in enumerate(row):
+                    data_ws.write(row_idx, col_idx, value)
+                row_idx += 1
+            else:
+                print(f"Skipped row with mismatched length: {row}")
+
+    for i in range(len(columns)):
+        data_ws.set_column(i, i, 20)
+
+    cursor.close()
+    conn.close()
+
+    # --- Create Summary Sheet ---
+    df = pd.DataFrame(all_rows, columns=columns)
+    summary_ws = workbook.add_worksheet("Summary")
+
+    summary_ws.write("A1", "Report Name")
+    summary_ws.write("B1", report_name)
+    summary_ws.write("A2", "Generated On")
+    summary_ws.write("B2", timestamp)
+    summary_ws.write("A3", "Total Rows")
+    summary_ws.write("B3", len(df))
+    summary_ws.write("A4", "Total Columns")
+    summary_ws.write("B4", len(df.columns))
+
+    row = 6
+    numeric_cols = df.select_dtypes(include='number').columns
+    chart_data_start_row = row + 2  # Save for chart
+
+    if not numeric_cols.empty:
+        summary_ws.write(row, 0, "Numeric Summary")
+        row += 1
+        summary_ws.write_row(row, 0, ["Column", "Total", "Average", "Min", "Max"])
+        row += 1
+        start_chart_row = row
+        for col in numeric_cols:
+            summary_ws.write(row, 0, col)
+            summary_ws.write(row, 1, df[col].sum())
+            summary_ws.write(row, 2, df[col].mean())
+            summary_ws.write(row, 3, df[col].min())
+            summary_ws.write(row, 4, df[col].max())
+            row += 1
+        end_chart_row = row - 1
+        row += 2
+
+        # --- Add Bar Chart for Total Values ---
+        chart = workbook.add_chart({'type': 'column'})
+        chart.add_series({
+            'name':       'Total Values',
+            'categories': ['Summary', start_chart_row, 0, end_chart_row, 0],
+            'values':     ['Summary', start_chart_row, 1, end_chart_row, 1],
+        })
+        chart.set_title({'name': 'Total per Numeric Column'})
+        chart.set_x_axis({'name': 'Columns'})
+        chart.set_y_axis({'name': 'Total'})
+        summary_ws.insert_chart(row, 0, chart)
+        row += 15  # Space after chart
+
+    cat_cols = df.select_dtypes(include='object').columns
+    if not cat_cols.empty:
+        summary_ws.write(row, 0, "Categorical Value Counts (Top 5)")
+        row += 1
+        for col in cat_cols:
+            summary_ws.write(row, 0, f"{col}")
+            row += 1
+            value_counts = df[col].value_counts().head(5)
+            summary_ws.write_row(row, 0, ["Value", "Count"])
+            row += 1
+            start_pie_row = row
+            for val, count in value_counts.items():
+                summary_ws.write(row, 0, str(val))
+                summary_ws.write(row, 1, int(count))
+                row += 1
+            end_pie_row = row - 1
+
+            # --- Add Pie Chart for this categorical column ---
+            pie_chart = workbook.add_chart({'type': 'pie'})
+            pie_chart.add_series({
+                'name': f'Top 5 {col}',
+                'categories': ['Summary', start_pie_row, 0, end_pie_row, 0],
+                'values':     ['Summary', start_pie_row, 1, end_pie_row, 1],
+            })
+            pie_chart.set_title({'name': f'Top 5 {col}'})
+            summary_ws.insert_chart(row, 0, pie_chart)
+            row += 15  # Space after chart
+
+    workbook.close()
+    return output_path
