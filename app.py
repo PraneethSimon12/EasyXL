@@ -12,10 +12,9 @@ OUTPUT_FOLDER = 'output_reports'
 os.makedirs(SQL_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# --- DB Connection Details (only server is fixed now) ---
-SERVER = 'USER\\SQLEXPRESS'  # ✅ Replace with your server name
 
-# --- Helper: get connection for selected DB ---
+SERVER = 'USER\\SQLEXPRESS'  
+
 def get_connection(database_name: str):
     conn = pyodbc.connect(
         f"DRIVER={{SQL Server}};SERVER={SERVER};DATABASE={database_name};Trusted_Connection=yes;"
